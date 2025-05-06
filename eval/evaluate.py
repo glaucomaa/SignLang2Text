@@ -21,11 +21,16 @@ from utils.logging_utils import setup_logging
 
 
 def greedy_decode(model, frames, sos_idx, eos_idx, pad_idx, max_len: int = 256):
+    frames_mask = frames.flatten(2).abs().sum(-1).eq(0)  # [1,T]
     ys = torch.tensor([[sos_idx]], device=frames.device)
+    use_amp = frames.device.type == "cuda"
     with torch.no_grad():
         while ys.size(1) < max_len:
-            logits = model(frames, ys)  # [1,L,V]
-            next_tok = logits[:, -1].argmax(-1, True)  # [1,1]
+            with torch.autocast("cuda", enabled=use_amp):
+                logits = model(
+                    frames, ys, memory_key_padding_mask=frames_mask
+                )  # [1,L,V]
+                next_tok = logits[:, -1].argmax(-1, True)  # [1,1]
             ys = torch.cat([ys, next_tok], dim=1)
             if next_tok.item() in {eos_idx, pad_idx}:
                 break
@@ -40,7 +45,7 @@ def greedy_decode(model, frames, sos_idx, eos_idx, pad_idx, max_len: int = 256):
 def main(cfg: DictConfig):
     task = Task.init(
         project_name=cfg.clearml.project_name,
-        task_name="Evaluation" + cfg.clearml.task_name,
+        task_name="Evaluation of " + cfg.clearml.task_name,
         reuse_last_task_id=False,
     )
     logger = task.get_logger()
@@ -48,6 +53,7 @@ def main(cfg: DictConfig):
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     log.info(f"Running evaluation on {device}")
+    use_amp = device == "cuda"
 
     ds = SignLanguageDataset(
         cfg.dataset.test_data_dir,
@@ -76,7 +82,8 @@ def main(cfg: DictConfig):
     prog = tqdm(dl, desc="Decoding", ncols=100)
     for i, (frames, targets) in enumerate(prog, 1):
         frames = frames.to(device)
-        pred = greedy_decode(model, frames, sos_idx, eos_idx, pad_idx)
+        with torch.autocast("cuda", enabled=use_amp):
+            pred = greedy_decode(model, frames, sos_idx, eos_idx, pad_idx)
 
         ref_txt = "".join(ds.vocab.itos[t.item()] for t in targets[0][1:-1])
         hyp_txt = "".join(ds.vocab.itos[t] for t in pred[1:-1])
@@ -87,8 +94,6 @@ def main(cfg: DictConfig):
             img_tensor = frames[0, 0].cpu()  # [C,H,W]
             img = img_tensor.permute(1, 2, 0).numpy()  # → [H,W,C]
 
-            # mean = torch.tensor([0.485, 0.456, 0.406])
-            # std = torch.tensor([0.229, 0.224, 0.225])
             mean = np.array([0.485, 0.456, 0.406])
             std = np.array([0.229, 0.224, 0.225])
             img = img * std + mean
