@@ -1,7 +1,8 @@
 import argparse, os, glob, cv2, sys, math, torch, numpy as np
 import torchvision.transforms as T
 import torch.nn as nn
-
+from tqdm import tqdm # cuz need
+from pathlib import Path
 
 def load_i3d_rgb(checkpoint, device="cuda", model_dir="pytorch-i3d"):
     sys.path.append(model_dir)          
@@ -39,37 +40,30 @@ def frames_to_tensor(frames):
 
 def video_to_tokens(frames, i3d, device, batch=8, clip_len=16, stride=8):
     pad_len = (8 - len(frames) % 8) % 8
-    print("pad_len:", pad_len)
-    print("stage 1:", np.array(frames).shape)
-    frames.extend([frames[-1]] * pad_len)
-    print("stage 2:", np.array(frames).shape)
-    windows = []
-    print("len(frames):", len(frames))
+    frames = frames + [frames[-1]] * pad_len
+
+    windows: List[List[np.ndarray]] = []
     if len(frames) <= clip_len:
-        print("if clause")
         windows.append(frames)
     else:
-        print("else clause")
-        print("len(frames)-clip_len+1:", len(frames)-clip_len+1)
-        for start in range(0, len(frames)-clip_len+1, stride):
-            windows.append(frames[start:start+clip_len])
+        for start in range(0, len(frames) - clip_len + 1, stride):
+            windows.append(frames[start : start + clip_len])
 
-    print("stage 3: ", np.array(windows).shape)
-
-    feats = []
+    feats: List[torch.Tensor] = []
     with torch.no_grad():
-        for b in range(0, len(windows), batch):
-            clip_batch = [frames_to_tensor(w) for w in windows[b:b+batch]]
-            print("stage 4:", torch.tensor(np.array(windows)).shape)
+        pb = tqdm(
+            range(0, len(windows), batch),
+            desc="      windows(batch)",
+            leave=False,
+            unit="batch",
+        )
+        for b in pb:
+            clip_batch = [frames_to_tensor(w) for w in windows[b : b + batch]]
             clip_batch = torch.stack(clip_batch).to(device)
-            print("stage 5:", clip_batch.shape)
             fmap = i3d.extract_features_not_pool(clip_batch)
-            print("stage 6:", fmap.shape)
-            pooled = fmap.mean((3,4)).permute(0,2,1)
-            print("stage 7:", pooled.shape)
+            pooled = fmap.mean((3, 4)).permute(0, 2, 1)  # [B,T/2,1024]
             feats.append(pooled.cpu())
-    return torch.cat(feats, 0).reshape(-1,1024)
-
+    return torch.cat(feats, 0).reshape(-1, 1024) 
 
 def main():
     ap = argparse.ArgumentParser()
@@ -83,24 +77,29 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
     i3d = load_i3d_rgb(args.ckpt, args.device, args.model_dir)
+    #hot fix
+    i3d.extract_features_not_pool = i3d.extract_features
 
     exts = ("*.mp4","*.mov","*.avi","*.mkv")
     videos = [f for ext in exts for f in glob.glob(os.path.join(args.videos_dir, ext))]
     if not videos:
-        print("No video files found"); return
+        print("No video files found", args.videos_dir); return
 
-    for vid in sorted(videos):
-        stem = os.path.splitext(os.path.basename(vid))[0]
-        out_path = os.path.join(args.out_dir, stem + ".npy")
-        if os.path.exists(out_path):
-            print(f"[skip] {stem}"); continue
+    for vid in tqdm(sorted(videos), desc="Videos", unit="vid"):
+        vid = Path(vid)
+        stem = vid.stem
+        out_path = Path(args.out_dir) / f"{stem}.npy"
+        if out_path.exists():
+            tqdm.write(f"[skip] {stem}")
+            continue
         try:
             frames = read_video(vid)
             tokens = video_to_tokens(frames, i3d, args.device)
             np.save(out_path, tokens.numpy())
-            print(f"[OK] {stem}: {tokens.shape}")
+            tqdm.write(f"[OK]   {stem}: {tokens.shape}")
         except Exception as e:
-            print(f"[ERR] {stem}: {e}")
+            tqdm.write(f"[ERR]  {stem}: {e}")
+
 
 if __name__ == "__main__":
     main()

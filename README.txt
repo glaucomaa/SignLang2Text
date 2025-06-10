@@ -16,3 +16,7 @@ tools/video2feature_2.py:
             Используем models/rgb_imagenet.pt, но также есть models/rgb_charades.pt, models/flow_imagenet.pt
             и models/flow_charades.pt
     --device: "cuda" или "cpu"
+
+
+UPD: 
+ * git clone https://github.com/piergiaj/pytorch-i3d.git tools/pytorch-i3d

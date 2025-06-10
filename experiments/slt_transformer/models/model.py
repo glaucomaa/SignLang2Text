@@ -24,7 +24,7 @@ class PositionalEncoding(nn.Module):
         seq_len = x.size(1)
         if seq_len > self.pe.size(0):
             self.pe = self._build_pe(seq_len * 2).to(x.device)  # удвоим с запасом
-        return x + self.pe[:seq_len]
+        return x + self.pe[:seq_len].unsqueeze(0).to(x.device) # hot fix
 
 
 class SLTTransformerModel(BaseModel):
