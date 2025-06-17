@@ -16,3 +16,5 @@ pathlib
 requests
 numba
 kaggle
+
+gdown

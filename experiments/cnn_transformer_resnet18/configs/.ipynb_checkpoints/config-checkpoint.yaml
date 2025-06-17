@@ -1,0 +1,37 @@
+model:
+  _target_: experiments.cnn_transformer_resnet18.models.model.CNNTransformerModel
+  hidden_dim: 512
+  num_layers: 4
+  num_heads: 8
+  ffn_dim: 2048
+  dropout: 0.1
+  vocab_size: 3000
+  pretrained: true
+  pad_idx: 0
+  freeze_cnn: false
+
+training:
+  epochs: 20
+  batch_size: 128
+  learning_rate: 0.0003
+  seed: 42
+  grad_clip: 1.0
+  log_every_steps: 20
+  patience: 5
+
+dataset:
+  data_dir: "data/signmnist/train/videos"
+  annotation_file: "data/signmnist/train/annotations.tsv"
+  transform: "default"
+  val_frac: 0.10
+  test_data_dir: "data/signmnist/test/videos"
+  test_annotation_file: "data/signmnist/test/annotations.tsv"
+
+clearml:
+  enabled: true
+  project_name: "SignLang2Text"
+  task_name: "resnet18_transformer"
+  output_uri: null
+
+paths:
+  ckpt_dir: "experiments/cnn_transformer_resnet18/checkpoints"

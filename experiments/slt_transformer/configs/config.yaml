@@ -1,0 +1,39 @@
+model:
+  _target_: experiments.slt_transformer.models.model.SLTTransformerModel
+  input_dim: 1024
+  d_model: 256
+  nhead: 4
+  num_encoder_layers: 6
+  num_decoder_layers: 3
+  dim_feedforward: 1024
+  dropout: 0.3
+  vocab_size: 7000      
+  pad_idx: 0            
+  max_len: 1024
+
+training:
+  epochs: 30
+  batch_size: 32
+  learning_rate: 0.0003
+  seed: 42
+  grad_clip: 1.0
+  log_every_steps: 20
+  patience: 7
+
+dataset:
+  train_feature_dir: "data/how2sign/train"
+  train_annotation_file: "data/how2sign/cvpr23.fairseq.i3d.train.how2sign-1.tsv"
+  val_feature_dir: "data/how2sign/val"
+  val_annotation_file: "data/how2sign/cvpr23.fairseq.i3d.val.how2sign.tsv"
+  test_feature_dir: "data/how2sign/test"
+  test_annotation_file: "data/how2sign/cvpr23.fairseq.i3d.test.how2sign.tsv"
+  sp_model_path: "data/how2sign/vocab/cvpr23.train.how2sign.unigram7000_lowercased.model"
+
+clearml:
+  enabled: false
+  project_name: "How2Sign"
+  task_name: "SLTTransformerModel"
+  output_uri: null
+
+paths:
+  ckpt_dir: "experiments/slt_transformer/checkpoints"
