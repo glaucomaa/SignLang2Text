@@ -1,0 +1,70 @@
+
+model:
+  _target_: experiments.slt_transformerf.models.model.SLTTransformerModel
+
+  feats_type: i3d                
+
+  encoder_embed_dim:        512
+  encoder_ffn_embed_dim:    2048
+  encoder_layers:           12
+  encoder_attention_heads:  8
+  encoder_normalize_before: true
+
+  decoder_embed_dim:        512
+  decoder_ffn_embed_dim:    2048
+  decoder_layers:           6
+  decoder_attention_heads:  8
+  decoder_output_dim:       512
+  decoder_normalize_before: true
+  share_decoder_input_output_embed: false
+
+  dropout:              0.1
+  attention_dropout:    0.1
+  activation_dropout:   0.1
+  layernorm_embedding:  false
+  no_scale_embedding:   false
+
+  load_pretrained_encoder_from: null   
+  load_pretrained_decoder_from: null   
+
+
+training:
+  epochs:            30
+  batch_size:        32
+  learning_rate:     3e-4
+  seed:              42
+  grad_clip:         1.0
+  log_every_steps:   20
+  patience:          7
+
+
+dataset:
+  train_feature_dir:      "data/how2sign/train"
+  train_annotation_file:  "data/how2sign/cvpr23.fairseq.i3d.train.how2sign-1.tsv"
+
+  val_feature_dir:        "data/how2sign/val"
+  val_annotation_file:    "data/how2sign/cvpr23.fairseq.i3d.val.how2sign.tsv"
+
+  test_feature_dir:       "data/how2sign/test"
+  test_annotation_file:   "data/how2sign/cvpr23.fairseq.i3d.test.how2sign.tsv"
+
+  sp_model_path:          "data/how2sign/vocab/cvpr23.train.how2sign.unigram7000_lowercased.model"
+
+
+
+task:
+  max_source_positions: 1024  
+  max_target_positions: 256  
+  feats_type: i3d            
+
+
+
+clearml:
+  enabled:       false
+  project_name:  "How2Sign"
+  task_name:     "SLTTransformerModelF"
+  output_uri:    null
+
+
+paths:
+  ckpt_dir: "experiments/slt_transformer/checkpoints"

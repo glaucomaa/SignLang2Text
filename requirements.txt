@@ -18,6 +18,8 @@ numba
 kaggle
 
 gdown
+fairseq>=0.12     
+pose-format 
 opencv-python
 sentencepiece
 sacrebleu>=2.0.0
