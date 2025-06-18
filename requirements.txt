@@ -18,3 +18,5 @@ numba
 kaggle
 
 gdown
+fairseq>=0.12     
+pose-format 
