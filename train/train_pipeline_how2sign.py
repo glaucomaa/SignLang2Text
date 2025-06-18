@@ -14,7 +14,10 @@ from datautils.collate_how2sign import make_collate_fn
 
 from utils import logging_utils, seed_utils
 from utils.clearml_utils import get_logger, init_clearml
-
+import torch.multiprocessing as mp
+mp.set_sharing_strategy('file_system')
+import sacrebleu
+from eval.metrics import char_error_rate, word_error_rate
 
 def build_optimizer(model: nn.Module, lr: float):
     return torch.optim.Adam((p for p in model.parameters() if p.requires_grad), lr=lr)
@@ -40,30 +43,167 @@ def step_validation(model, loader, loss_fn, device: str) -> float:
 
 
 @torch.no_grad()
-def greedy_accuracy(model, loader, sos_idx, eos_idx, pad_idx, sp_model, device: str) -> float:
+def evaluate_batch_metrics(
+    model,
+    loader,
+    sos_idx: int,
+    eos_idx: int,
+    pad_idx: int,
+    vocab_or_sp,
+    device: str,
+):
+    model.eval()
+    total, correct = 0, 0
+    cer_sum, wer_sum = 0.0, 0.0
+    refs, hyps = [], []
+    
+    special_tokens = {pad_idx, eos_idx}
+    
+    def decode(ids: list[int]) -> str:
+        ids = [i for i in ids if i not in special_tokens]
+        if hasattr(vocab_or_sp, "decode_ids"):
+            return vocab_or_sp.decode_ids(ids)
+        else:
+            return "".join(vocab_or_sp.itos[i] for i in ids)
+    
+    autocast_ctx = torch.amp.autocast("cuda") if device.startswith('cuda') else torch.nullcontext()
+    
+    with autocast_ctx:
+        for frames, targets in tqdm(loader, desc="EvalMetrics", ncols=80):
+            frames = frames.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True)
+            
+            preds = greedy_decode_batch(
+                model=model,
+                frames=frames,
+                sos_idx=sos_idx,
+                eos_idx=eos_idx,
+                pad_idx=pad_idx,
+                max_len=targets.size(1) * 2,
+                device=device,
+            )
+            
+            for ys, tgt in zip(preds, targets):
+                hyp = decode(ys[1:].tolist())
+                ref = decode(tgt[1:-1].tolist())
+                refs.append(ref)
+                hyps.append(hyp)
+                correct += int(hyp == ref)
+                cer_sum += char_error_rate(ref, hyp)
+                wer_sum += word_error_rate(ref, hyp)
+                total += 1
+    
+    bleu = sacrebleu.corpus_bleu(hyps, [refs]).score
+    model.train()
+    return {
+        "exact_match": correct / total if total else 0.0,
+        "cer": cer_sum / total if total else 0.0,
+        "wer": wer_sum / total if total else 0.0,
+        "bleu": bleu,
+    }
+
+
+@torch.no_grad()
+def greedy_decode_batch(
+    model,
+    frames: torch.Tensor,        # [B, T_src, …]
+    sos_idx: int,
+    eos_idx: int,
+    pad_idx: int,
+    max_len: int,
+    device: str,
+):
+    B = frames.size(0)
+    src_mask = frames.flatten(2).abs().sum(-1).eq(0).to(device)  # [B, T_src]
+
+    ys = torch.full((B, 1), sos_idx, device=device, dtype=torch.long)
+
+    for _ in range(max_len - 1):
+        logits = model(
+            frames.to(device),
+            ys,
+            memory_key_padding_mask=src_mask,
+        )  # -> [B, L, V]
+        next_tok = logits[:, -1].argmax(-1, keepdim=True)  # [B,1]
+        ys = torch.cat([ys, next_tok], dim=1)               # [B, L+1]
+
+        if ((next_tok == eos_idx) | (next_tok == pad_idx)).all():
+            break
+
+    return ys  # [B, <=max_len]
+
+
+
+@torch.no_grad()
+def greedy_accuracy(
+    model,
+    loader,
+    sos_idx: int,
+    eos_idx: int,
+    pad_idx: int,
+    vocab_or_sp,
+    device: str,
+):
+
     model.eval()
     correct, total = 0, 0
-    use_amp = device == "cuda"
-    for frames, targets in loader:
-        B = frames.size(0)
-        frames = frames.to(device)
-        frames_mask = frames.flatten(2).abs().sum(-1).eq(0)
-        for i in range(B):
-            clip = frames[i:i+1]
-            clip_mask = frames_mask[i:i+1]
-            target = targets[i]
-            ys = torch.tensor([[sos_idx]], device=device)
-            max_len = target.size(0) * 2
-            while ys.size(1) < max_len:
-                with torch.autocast("cuda", enabled=use_amp):
-                    next_tok = model(clip, ys, memory_key_padding_mask=clip_mask)[:, -1].argmax(-1, keepdim=True)
-                ys = torch.cat([ys, next_tok], dim=1)
-                if next_tok.item() in (eos_idx, pad_idx):
-                    break
-            pred_txt = sp_model.decode_ids(ys.squeeze(0).tolist()[1:-1])
-            ref_txt = sp_model.decode_ids(target.tolist()[1:-1])
-            correct += int(pred_txt == ref_txt)
+
+    def decode(ids: list[int]) -> str:
+        ids = [i for i in ids if i not in (pad_idx, eos_idx)]
+        if hasattr(vocab_or_sp, "decode_ids"):
+            return vocab_or_sp.decode_ids(ids)
+        else:
+            return "".join(vocab_or_sp.itos[i] for i in ids)
+
+    for frames, targets in tqdm(loader, desc="GreedyEval", ncols=80):
+        preds = greedy_decode_batch(
+            model, frames, sos_idx, eos_idx, pad_idx,
+            max_len=targets.size(1) * 2,
+            device=device,
+        )  # [B, L_pred]
+
+        for ys, tgt in zip(preds, targets):
+            hyp = decode(ys[1:].tolist())
+            ref = decode(tgt[1:-1].tolist())
+            correct += int(hyp == ref)
             total += 1
+
+    model.train()
+    return correct / total if total else 0.0
+
+def fast_eval(model, loader, vocab_or_sp, sos_idx, eos_idx, pad_idx, device):
+    model.eval()
+    correct, total = 0, 0
+    
+    special_tokens = {pad_idx, eos_idx}
+    
+    def decode(ids: list[int]) -> str:
+        ids = [i for i in ids if i not in special_tokens]
+        if hasattr(vocab_or_sp, "decode_ids"):
+            return vocab_or_sp.decode_ids(ids)
+        else:
+            return "".join(vocab_or_sp.itos[i] for i in ids)
+    
+    with torch.no_grad():
+        autocast_ctx = torch.cuda.amp.autocast() if device.type == 'cuda' else torch.nullcontext()
+        
+        with autocast_ctx:
+            for frames, targets in tqdm(loader, desc="FastEval", ncols=80):
+                frames = frames.to(device, non_blocking=True)
+                targts = targets.to(device, non_blocking=True)
+                
+                preds = greedy_decode_batch(
+                    model, frames, sos_idx, eos_idx, pad_idx,
+                    max_len=targets.size(1) * 2,
+                    device=device,
+                )
+                
+                for ys, tgt in zip(preds, targets):
+                    hyp = decode(ys[1:].tolist())
+                    ref = decode(tgt[1:-1].tolist())
+                    correct += int(hyp == ref)
+                    total += 1
+    
     model.train()
     return correct / total if total else 0.0
 
@@ -110,8 +250,8 @@ def main(cfg: DictConfig):
 
     pad_idx = train_ds.pad_index
     collate = make_collate_fn(pad_idx)
-    train_loader = DataLoader(train_ds, cfg.training.batch_size, True, collate_fn=collate, num_workers=4)
-    val_loader = DataLoader(val_ds, cfg.training.batch_size, False, collate_fn=collate, num_workers=4)
+    train_loader = DataLoader(train_ds, cfg.training.batch_size, True, collate_fn=collate, num_workers=8)
+    val_loader = DataLoader(val_ds, cfg.training.batch_size, False, collate_fn=collate, num_workers=8)
 
     cfg.model.vocab_size = train_ds.vocab_size
     cfg.model.pad_idx = pad_idx
@@ -121,7 +261,15 @@ def main(cfg: DictConfig):
 
     loss_fn = nn.CrossEntropyLoss(ignore_index=pad_idx)
     optimizer = build_optimizer(model, cfg.training.learning_rate)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=max(1, cfg.training.patience // 2))
+    #scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=max(1, cfg.training.patience // 2))
+    sched_cfg = cfg.training.lr_scheduler
+
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode=sched_cfg.mode,
+        factor=sched_cfg.factor,
+        patience=sched_cfg.patience,
+    )
     scaler = torch.cuda.amp.GradScaler(enabled=(device == "cuda"))
 
     ckpt_dir = Path(cfg.paths.ckpt_dir).expanduser().resolve()
@@ -135,6 +283,8 @@ def main(cfg: DictConfig):
     best_val = float("inf")
     bad_epochs = 0
     global_step = 0
+    best_cer   = float("inf")
+    best_bleu  = -float("inf")
 
     for epoch in range(1, cfg.training.epochs + 1):
         logger.info(f"Epoch {epoch}/{cfg.training.epochs}")
@@ -164,13 +314,31 @@ def main(cfg: DictConfig):
             global_step += 1
 
         val_loss = step_validation(model, val_loader, loss_fn, device)
-        val_acc = greedy_accuracy(model, val_loader, sos_idx, eos_idx, pad_idx, train_ds.sp, device)
+        #val_acc = greedy_accuracy(model, val_loader, sos_idx, eos_idx, pad_idx, train_ds.sp, device)
+        metrics = evaluate_batch_metrics(
+            model,
+            val_loader,
+            sos_idx, eos_idx, pad_idx,
+            train_ds.sp if hasattr(train_ds, "sp") else train_ds.vocab, device)
         scheduler.step(val_loss)
 
-        logger.info(f"Epoch {epoch} | val_loss={val_loss:.4f} | val_acc={val_acc:.3f}")
+        logger.info(
+            f"Epoch {epoch} | val_loss={val_loss:.4f} "
+            f"| EM={metrics['exact_match']:.3f} "
+            f"| CER={metrics['cer']:.3f} "
+            f"| WER={metrics['wer']:.3f} "
+            f"| BLEU={metrics['bleu']:.1f}"
+        )
+        #logger.info(f"Epoch {epoch} | val_loss={val_loss:.4f} | val_acc={val_acc:.3f}")
+        #if clr_logger:
+        #    clr_logger.report_scalar("loss/val_epoch", "epoch", val_loss, epoch)
+        #    clr_logger.report_scalar("acc/val_epoch", "epoch", val_acc, epoch)
         if clr_logger:
-            clr_logger.report_scalar("loss/val_epoch", "epoch", val_loss, epoch)
-            clr_logger.report_scalar("acc/val_epoch", "epoch", val_acc, epoch)
+            clr_logger.report_scalar("loss/val_epoch", "epoch", val_loss,epoch)
+            clr_logger.report_scalar("acc/val_epoch","exact_match", metrics["exact_match"], epoch)
+            clr_logger.report_scalar("cer/val_epoch","cer",metrics["cer"],epoch)
+            clr_logger.report_scalar("wer/val_epoch","wer",metrics["wer"],epoch)
+            clr_logger.report_scalar("bleu/val_epoch","bleu",metrics["bleu"],epoch)
 
         save_checkpoint(model, latest_path)
         if task:
@@ -186,6 +354,20 @@ def main(cfg: DictConfig):
         else:
             bad_epochs += 1
             logger.info(f" ▸ No improvement — {bad_epochs}/{cfg.training.patience} bad epochs")
+
+        if metrics["cer"] < best_cer:
+            best_cer = metrics["cer"]
+            cer_path = ckpt_dir / "model_best_cer.pt"
+            save_checkpoint(model, cer_path)
+            logger.info(f" ▸ New BEST_CER ckpt (CER={best_cer:.3f})")
+            if task: upload_replace(task, "best_ckpt_cer", cer_path)
+
+        if metrics["bleu"] > best_bleu:
+            best_bleu = metrics["bleu"]
+            bleu_path = ckpt_dir / "model_best_bleu.pt"
+            save_checkpoint(model, bleu_path)
+            logger.info(f" ▸ New BEST_BLEU ckpt (BLEU={best_bleu:.2f})")
+            if task: upload_replace(task, "best_ckpt_bleu", bleu_path)
 
         if bad_epochs >= cfg.training.patience:
             logger.info("Early stopping triggered.")

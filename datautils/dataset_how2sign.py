@@ -30,8 +30,13 @@ class How2SignI3DDataset(Dataset):
         sample_id = row["id"]
         text = row["translation"]
         path = self.data_dir / f"{sample_id}.npy"
+        #if idx < 5:
+        #    print(f"[DEBUG] idx={idx} id={sample_id} text_len={len(text)} chars, first50=\"{text[:50]}\"")
+
         feats = torch.from_numpy(np.load(path))  # [T, 1024]
         tokens = [self.sp.bos_id()] + self.sp.encode(text, out_type=int) + [self.sp.eos_id()]
+        #if idx < 5:
+        #    print(f"[DEBUG] idx={idx} tokens_len={len(tokens)}")
         return feats, torch.tensor(tokens, dtype=torch.long)
 
     @property

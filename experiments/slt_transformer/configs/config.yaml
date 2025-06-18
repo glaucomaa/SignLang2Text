@@ -12,25 +12,29 @@ model:
   max_len: 1024
 
 training:
-  epochs: 30
-  batch_size: 32
+  epochs: 80
+  batch_size: 64
   learning_rate: 0.0003
   seed: 42
   grad_clip: 1.0
   log_every_steps: 20
-  patience: 7
+  patience: 8
+  lr_scheduler:
+    mode: min
+    factor: 0.5
+    patience: 2
 
 dataset:
-  train_feature_dir: "data/how2sign/train"
-  train_annotation_file: "data/how2sign/cvpr23.fairseq.i3d.train.how2sign-1.tsv"
-  val_feature_dir: "data/how2sign/val"
-  val_annotation_file: "data/how2sign/cvpr23.fairseq.i3d.val.how2sign.tsv"
-  test_feature_dir: "data/how2sign/test"
-  test_annotation_file: "data/how2sign/cvpr23.fairseq.i3d.test.how2sign.tsv"
+  train_feature_dir: "data/how2sign/i3d_features/train"
+  train_annotation_file: "data/how2sign/i3d_features/cvpr23.fairseq.i3d.train.how2sign.tab"
+  val_feature_dir: "data/how2sign/i3d_features/val"
+  val_annotation_file: "data/how2sign/i3d_features/cvpr23.fairseq.i3d.val.how2sign.tab"
+  test_feature_dir: "data/how2sign/i3d_features/test"
+  test_annotation_file: "data/how2sign/i3d_features/cvpr23.fairseq.i3d.test.how2sign.tab"
   sp_model_path: "data/how2sign/vocab/cvpr23.train.how2sign.unigram7000_lowercased.model"
 
 clearml:
-  enabled: false
+  enabled: true
   project_name: "How2Sign"
   task_name: "SLTTransformerModel"
   output_uri: null
